@@ -1,0 +1,705 @@
+package POE::Component::IRC::Plugin::BasePoCoWrap;
+
+use warnings;
+use strict;
+
+our $VERSION = '0.001';
+
+use Carp;
+use POE;
+use POE::Component::IRC::Plugin qw(:ALL);
+
+sub new {
+    my $package = shift;
+    croak "Even number of arguments must be specified"
+        if @_ & 1;
+    my %args = @_;
+    $args{ lc $_ } = delete $args{ $_ } for keys %args;
+
+    # fill in the defaults
+    my $self = bless {}, $package;
+    %args = (
+        debug            => 0,
+        auto             => 1,
+        response_event   => 'irc_poco_wrap_response',
+        banned           => [],
+        addressed        => 1,
+        eat              => 1,
+        trigger          => qr/^poco_wrap\s+(?=\S)/i,
+        listen_for_input => [ qw(public notice privmsg) ],
+
+        $self->_make_default_args(),
+
+        %args,
+    );
+
+    $args{listen_for_input} = {
+        map { $_ => 1 } @{ $args{listen_for_input} || [] }
+    };
+
+    $self->{ $_ } = delete $args{ $_ } for keys %args;
+
+    return $self;
+}
+
+sub _start {
+    my ( $kernel, $self ) = @_[ KERNEL, OBJECT ];
+    $self->{_session_id} = $_[SESSION]->ID();
+    $kernel->refcount_increment( $self->{_session_id}, __PACKAGE__ );
+    
+    $self->{poco} = $self->_make_poco;
+
+    undef;
+}
+
+sub PCI_register {
+    my ( $self, $irc ) = splice @_, 0, 2;
+    
+    $self->{irc} = $irc;
+    
+    $irc->plugin_register( $self, 'SERVER', qw(public notice msg) );
+    
+    $self->{_session_id} = POE::Session->create(
+        object_states => [
+            $self => [
+                qw(
+                    _start
+                    _shutdown
+                    _poco_done
+                    _poco_begin
+                )
+            ],
+        ],
+    )->ID;
+
+    return 1;
+}
+
+sub _shutdown {
+    my ($kernel, $self) = @_[ KERNEL, OBJECT ];
+    $self->{poco}->shutdown;
+    $kernel->alarm_remove_all();
+    $kernel->refcount_decrement( $self->{_session_id}, __PACKAGE__ );
+    undef;
+}
+
+sub PCI_unregister {
+    my $self = shift;
+    
+    # Plugin is dying make sure our POE session does as well.
+    $poe_kernel->call( $self->{_session_id} => '_shutdown' );
+    
+    delete $self->{irc};
+    
+    return 1;
+}
+
+sub S_public {
+    my ( $self, $irc ) = splice @_, 0, 2;
+    my $who     = ${ $_[0] };
+    my $channel = ${ $_[1] }->[0];
+    my $message = ${ $_[2] };
+    return $self->_parse_input( $irc, $who, $channel, $message, 'public' );
+}
+
+sub S_notice {
+    my ( $self, $irc ) = splice @_, 0, 2;
+    my $who     = ${ $_[0] };
+    my $channel = ${ $_[1] }->[0];
+    my $message = ${ $_[2] };
+    return $self->_parse_input( $irc, $who, $channel, $message, 'notice' );
+}
+
+sub S_msg {
+    my ( $self, $irc ) = splice @_, 0, 2;
+    my $who     = ${ $_[0] };
+    my $channel = ${ $_[1] }->[0];
+    my $message = ${ $_[2] };
+    return $self->_parse_input( $irc, $who, $channel, $message, 'privmsg' );
+}
+
+sub _parse_input {
+    my ( $self, $irc, $who, $channel, $message, $type ) = @_;
+
+    warn "Got input: [ who => $who, channel => $channel, "
+            . "mesage => $message ]"
+        if $self->{debug};
+
+    return PCI_EAT_NONE
+        unless exists $self->{listen_for_input}{ $type };
+
+    my $what;
+    if ( $self->{addressed} and $type eq 'public' ) {
+        my $my_nick = $irc->nick_name();
+        ($what) = $message =~ m/^\s*\Q$my_nick\E[\:\,\;\.]?\s*(.*)$/i;
+    }
+    else {
+        $what = $message;
+    }
+
+    return PCI_EAT_NONE
+        unless defined $what and $what =~ s/$self->{trigger}//;
+
+    $what =~ s/^\s+|\s+$//;
+
+    return PCI_EAT_NONE
+            unless length $what;
+
+    warn "Matched trigger: [ who => $who, channel => $channel, "
+            . "what => $what ]"
+        if $self->{debug};
+
+    foreach my $ban_re ( @{ $self->{banned} || [] } ) {
+        return PCI_EAT_NONE
+            if $who =~ /$ban_re/;
+    }
+
+    $poe_kernel->post( $self->{_session_id} => _poco_begin => {
+                what    => $what,
+                who     => $who,
+                channel => $channel,
+                message => $message,
+                type    => $type,
+            }
+    );
+
+    return $self->{eat} ? PCI_EAT_ALL : PCI_EAT_NONE;
+}
+
+sub _poco_begin {
+    my ( $self, $args_ref ) = @_[OBJECT, ARG0];
+    $self->_make_poco_call( $args_ref );
+}
+
+sub _poco_done {
+    my ( $kernel, $self, $in_ref ) = @_[ KERNEL, OBJECT, ARG0 ];
+
+    my $response_message
+    = $self->_make_response_message( @_[ARG0 .. $#_] );
+
+    $self->{irc}->_send_event(
+        $self->{response_event} =>
+        $self->_make_response_event( @_[ARG0 .. $#_] )
+    );
+
+    if ( $self->{auto} ) {
+        my $response_type = $in_ref->{_type} eq 'public'
+                        ? 'privmsg'
+                        : $in_ref->{_type};
+
+        my $where = $in_ref->{_type} eq 'public'
+                ? $in_ref->{_channel}
+                : (split /!/, $in_ref->{_who})[0];
+
+        for ( @$response_message ) {
+            $kernel->post( $self->{irc} =>
+                $response_type =>
+                $where =>
+                $_
+            );
+        }
+    }
+
+    undef;
+}
+
+1;
+__END__
+
+
+=head1 NAME
+
+POE::Component::IRC::Plugin::BasePoCoWrap - base talking/ban/trigger
+functionality for plugins using POE::Component::*
+
+=head1 SYNOPSIS
+
+    package POE::Component::IRC::Plugin::WrapExample;
+
+    use strict;
+    use warnings;
+
+    use base 'POE::Component::IRC::Plugin::BasePoCoWrap';
+    use POE::Component::WWW::Google::Calculator;
+
+    sub _make_default_args {
+        return (
+            response_event   => 'irc_google_calc',
+            trigger          => qr/^calc\s+(?=\S)/i,
+        );
+    }
+
+    sub _make_poco {
+        return POE::Component::WWW::Google::Calculator->spawn(
+            debug => shift->{debug},
+        );
+    }
+
+    sub _make_response_message {
+        my $self   = shift;
+        my $in_ref = shift;
+        return [ exists $in_ref->{error} ? $in_ref->{error} : $in_ref->{out} ];
+    }
+
+    sub _make_response_event {
+        my $self = shift;
+        my $in_ref = shift;
+
+        return {
+            ( exists $in_ref->{error} 
+                ? ( error => $in_ref->{error} )
+                : ( result => $in_ref->{out} )
+            ),
+
+            map { $_ => $in_ref->{"_$_"} }
+                qw( who channel  message  type ),
+        }
+    }
+
+    sub _make_poco_call {
+        my $self = shift;
+        my $data_ref = shift;
+
+        $self->{poco}->calc( {
+                event       => '_poco_done',
+                term        => delete $data_ref->{what},
+                map +( "_$_" => $data_ref->{$_} ),
+                    keys %$data_ref,
+            }
+        );
+    }
+
+    1;
+    __END__
+
+=head1 DESCRIPTION
+
+The module is a base class to use for plugins which use a
+POE::Component::* object internally.
+It provides: triggering with a trigger, listening for requests in
+public channels, /notice and /msg (with ability to configure which exactly)
+as well as auto-responding to those requests.
+It provides "banned" feature which allows you to ignore certain people
+if their usermask matches a regex.
+
+I am not sure how flexible this base wrapper can get, just give it a try.
+Suggestions for improvements/whishlists are more than welcome.
+
+=head1 FORMAT OF THIS DOCUMENT
+
+This document uses word "plugin" to refer to the plugin which uses this
+base class.
+
+Of course, by providing more functionality you need to document it.
+At the end of this document you will find a POD snippet which you can
+simply copy/paste into your plugin's docs. B<I recommend> that you read
+that snippet first as to understand what functionality this base class
+provides.
+
+=head1 SUBS YOU NEED TO OVERRIDE
+
+=head2 C<_make_default_args>
+
+    sub _make_default_args {
+        return (
+            response_event   => 'irc_google_calc',
+            trigger          => qr/^calc\s+(?=\S)/i,
+        );
+    }
+
+This sub must return a list of key/value arguments which you need to
+override. What you specify here will be possible to override by the user
+from the C<new()> method of the plugin.
+
+A (sane) plugin would return a C<response_event> and C<trigger> arguments
+from this sub. There are some mandatory, or I shall rather say "reserved"
+arguments (they have defaults) which you can return from this sub which
+are as follows. On the left are the argument name, on the right is the
+default value it will take if you don't return it from the
+C<_make_default_args> sub:
+
+        debug            => 0,
+        auto             => 1,
+        response_event   => 'irc_poco_wrap_response',
+        banned           => [],
+        addressed        => 1,
+        eat              => 1,
+        trigger          => qr/^poco_wrap\s+(?=\S)/i,
+        listen_for_input => [ qw(public notice privmsg) ],
+
+Read the L<PLUGIN DOCUMENTATION> section to understand what each of
+these do.
+
+=head2 _make_poco
+
+    sub _make_poco {
+        return POE::Component::WWW::Google::Calculator->spawn(
+            debug => shift->{debug},
+        );
+    }
+
+This sub must return your POE::Component::* object. The arguments which
+are available to the user in the C<new()> method of the plugin
+(i.e. the ones which you returned from C<_make_default_args> and the
+default ones) will be available as hash keys in the first element of C<@_>
+which is also your plugin's object.
+
+=head2 _make_poco_call
+
+    sub _make_poco_call {
+        my $self = shift;
+        my $data_ref = shift;
+
+        $self->{poco}->calc( {
+                event       => '_poco_done',
+                term        => delete $data_ref->{what},
+                map +( "_$_" => $data_ref->{$_} ),
+                    keys %$data_ref,
+            }
+        );
+    }
+
+In this sub you would make a call to your POE::Component::* object
+asking for some data. After the plugin returns the calls to
+C<_make_response_message> and C<_make_response_event> will be made
+and C<@_[ARG0 .. $#_ ]> will contain whatever your PoCo returns.
+
+B<NOTE:> your PoCo must send the response to an event named C<_poco_done>
+otherwise you'll have to override more methods which is left as an exercise.
+(RTFS! :) )
+
+The first element of C<@_> in C<_make_poco_call> sub will contain plugin's
+object, the second element will contain a hashref with the following
+keys/values:
+
+    $VAR1 = {
+        'who' => 'Zoffix__!n=Zoffix@unaffiliated/zoffix',
+        'what' => 'http://zoffix.com',
+        'type' => 'public',
+        'channel' => '#zofbot',
+        'message' => 'CalcBot, rank http://zoffix.com'
+    };
+
+=over 10
+
+=item who
+
+The mask of the other who triggered the request
+
+=item what
+
+The input after stripping the trigger (note, leading/trailing white-space
+is stripped as well)
+
+=item type
+
+This will be either C<public>, C<privmsg> or C<notice> and will indicate
+where the message came from.
+
+=item channel
+
+This will be the channel name if the request came from a public channel
+
+=item message
+
+This will be the full message of the user who triggered the request.
+
+=back
+
+=head2 _make_response_message 
+
+    sub _make_response_message {
+        my $self   = shift;
+        my $in_ref = shift;
+        return [ exists $in_ref->{error} ? $in_ref->{error} : $in_ref->{out} ];
+    }
+
+This sub must return an arrayref. Each element will be "spoken" in the
+channel/notice/msg (depending on the type of the request). The <@_> array
+will contain plugin's object as the first element and C<@_[ARG0 .. $#_]>
+will be the rest of the elements.
+
+=head2 _make_response_event
+
+    sub _make_response_event {
+        my $self = shift;
+        my $in_ref = shift;
+
+        return {
+            ( exists $in_ref->{error} 
+                ? ( error => $in_ref->{error} )
+                : ( result => $in_ref->{out} )
+            ),
+
+            map { $_ => $in_ref->{"_$_"} }
+                qw( who channel  message  type ),
+        }
+    }
+
+This sub will be called internally like this:
+
+    $self->{irc}->_send_event(
+        $self->{response_event} =>
+        $self->_make_response_event( @_[ARG0 .. $#_] )
+    );
+
+Therefore it must return something that you would like to see in the
+even handler set up to handle C<response_even>. The C<@_> will contain
+plugin's object as the first element and C<@_[ARG0 .. $#_]>
+
+=head1 PREREQUISITES
+
+This base class likes to play with the following modules under the hood:
+
+    Carp
+    POE
+    POE::Component::IRC::Plugin
+
+=head1 EXAMPLES
+
+The C<examples/> directory of this distribution contains an example
+plugin written using POE::Component::IRC::Plugin::BasePoCoWrap as well as
+a google calculator bot which uses that plugin.
+
+=head1 PLUGIN DOCUMENTATION
+
+This section lists a "default" plugin's documentation which you can
+copy/paste (and EDIT!) into your brand new plugin to describe the
+functionality this base class offers. B<Make sure to proof read> ;)
+
+    =head1 SYNOPSIS
+
+        use strict;
+        use warnings;
+
+        use POE qw(Component::IRC  Component::IRC::Plugin::EXAMPLE);
+
+        my $irc = POE::Component::IRC->spawn(
+            nick        => 'EXAMPLE',
+            server      => 'irc.freenode.net',
+            port        => 6667,
+            ircname     => 'EXAMPLE',
+        );
+
+        POE::Session->create(
+            package_states => [
+                main => [ qw(_start irc_001) ],
+            ],
+        );
+
+        $poe_kernel->run;
+
+        sub _start {
+            $irc->yield( register => 'all' );
+            
+            $irc->plugin_add(
+                'XKCD' =>
+                    POE::Component::IRC::Plugin::EXAMPLE->new
+            );
+
+            $irc->yield( connect => {} );
+        }
+
+        sub irc_001 {
+            $_[KERNEL]->post( $_[SENDER] => join => '#zofbot' );
+        }
+
+        <Zoffix_> EXAMPLE, example example
+        <EXAMPLE> HUH?!?!! This is just an example?!?! :(
+
+    =head1 DESCRIPTION
+
+    This module is a L<POE::Component::IRC> plugin which uses
+    L<POE::Component::IRC::Plugin> for its base. It provides interface to
+    EXAMPLE EXAMPLE EXAMPLE EXAMPLE EXAMPLE.
+    It accepts input from public channel events, C</notice> messages as well
+    as C</msg> (private messages); although that can be configured at will.
+
+    =head1 CONSTRUCTOR
+
+    =head2 new
+
+        # plain and simple
+        $irc->plugin_add(
+            'EXAMPLE' => POE::Component::IRC::Plugin::EXAMPLE->new
+        );
+
+        # juicy flavor
+        $irc->plugin_add(
+            'EXAMPLE' =>
+                POE::Component::IRC::Plugin::EXAMPLE->new(
+                    auto             => 1,
+                    response_event   => 'irc_EXAMPLE',
+                    banned           => [ qr/aol\.com$/i ],
+                    addressed        => 1,
+                    trigger          => qr/^EXAMPLE\s+(?=\S)/i,
+                    listen_for_input => [ qw(public notice privmsg) ],
+                    eat              => 1,
+                    debug            => 0,
+                )
+        );
+
+    The C<new()> method constructs and returns a new
+    C<POE::Component::IRC::Plugin::EXAMPLE> object suitable to be
+    fed to L<POE::Component::IRC>'s C<plugin_add> method. The constructor
+    takes a few arguments, but I<all of them are optional>. The possible
+    arguments/values are as follows:
+
+    =head3 auto
+
+        ->new( auto => 0 );
+
+    B<Optional>. Takes either true or false values, specifies whether or not
+    the plugin should auto respond to requests. When the C<auto>
+    argument is set to a true value plugin will respond to the requesting
+    person with the results automatically. When the C<auto> argument
+    is set to a false value plugin will not respond and you will have to
+    listen to the events emited by the plugin to retrieve the results (see
+    EMITED EVENTS section and C<response_event> argument for details).
+    B<Defaults to:> C<1>.
+
+    =head3 response_event
+
+        ->new( response_event => 'event_name_to_recieve_results' );
+
+    B<Optional>. Takes a scalar string specifying the name of the event
+    to emit when the results of the request are ready. See EMITED EVENTS
+    section for more information. B<Defaults to:> C<irc_EXAMPLE>
+
+    =head3 banned
+
+        ->new( banned => [ qr/aol\.com$/i ] );
+
+    B<Optional>. Takes an arrayref of regexes as a value. If the usermask
+    of the person (or thing) making the request matches any of
+    the regexes listed in the C<banned> arrayref, plugin will ignore the
+    request. B<Defaults to:> C<[]> (no bans are set).
+
+    =head3 trigger
+
+        ->new( trigger => qr/^EXAMPLE\s+(?=\S)/i );
+
+    B<Optional>. Takes a regex as an argument. Messages matching this
+    regex will be considered as requests. See also
+    B<addressed> option below which is enabled by default. B<Note:> the
+    trigger will be B<removed> from the message, therefore make sure your
+    trigger doesn't match the actual data that needs to be processed.
+    B<Defaults to:> C<qr/^EXAMPLE\s+(?=\S)/i>
+
+    =head3 addressed
+
+        ->new( addressed => 1 );
+
+    B<Optional>. Takes either true or false values. When set to a true value
+    all the public messages must be I<addressed to the bot>. In other words,
+    if your bot's nickname is C<Nick> and your trigger is
+    C<qr/^trig\s+/>
+    you would make the request by saying C<Nick, trig EXAMPLE>.
+    When addressed mode is turned on, the bot's nickname, including any
+    whitespace and common punctuation character will be removed before
+    matching the C<trigger> (see above). When C<addressed> argument it set
+    to a false value, public messages will only have to match C<trigger> regex
+    in order to make a request. Note: this argument has no effect on
+    C</notice> and C</msg> requests. B<Defaults to:> C<1>
+
+    =head3 listen_for_input
+
+        ->new( listen_for_input => [ qw(public  notice  privmsg) ] );
+
+    B<Optional>. Takes an arrayref as a value which can contain any of the
+    three elements, namely C<public>, C<notice> and C<privmsg> which indicate
+    which kind of input plugin should respond to. When the arrayref contains
+    C<public> element, plugin will respond to requests sent from messages
+    in public channels (see C<addressed> argument above for specifics). When
+    the arrayref contains C<notice> element plugin will respond to
+    requests sent to it via C</notice> messages. When the arrayref contains
+    C<privmsg> element, the plugin will respond to requests sent
+    to it via C</msg> (private messages). You can specify any of these. In
+    other words, setting C<( listen_for_input => [ qr(notice privmsg) ] )>
+    will enable functionality only via C</notice> and C</msg> messages.
+    B<Defaults to:> C<[ qw(public  notice  privmsg) ]>
+
+    =head3 eat
+
+        ->new( eat => 0 );
+
+    B<Optional>. If set to a false value plugin will return a
+    C<PCI_EAT_NONE> after
+    responding. If eat is set to a true value, plugin will return a
+    C<PCI_EAT_ALL> after responding. See L<POE::Component::IRC::Plugin>
+    documentation for more information if you are interested. B<Defaults to>:
+    C<1>
+
+    =head3 debug
+
+        ->new( debug => 1 );
+
+    B<Optional>. Takes either a true or false value. When C<debug> argument
+    is set to a true value some debugging information will be printed out.
+    When C<debug> argument is set to a false value no debug info will be
+    printed. B<Defaults to:> C<0>.
+
+    =head1 EMITED EVENTS
+
+    =head2 response_event
+
+       EXAMPLE
+
+    The event handler set up to handle the event, name of which you've
+    specified in the C<response_event> argument to the constructor
+    (it defaults to C<irc_xkcd>) will recieve input
+    every time comic request is completed. The input will come in EXAMPLE.
+    The EXAMPLE as follows:
+
+    EXAMPLE
+    EXAMPLE
+    EXAMPLE
+    EXAMPLE
+    EXAMPLE
+
+=head1 AUTHOR
+
+Zoffix Znet, C<< <zoffix at cpan.org> >>
+
+=head1 BUGS
+
+Please report any bugs or feature requests to C<bug-poe-component-irc-plugin-basepocowrap at rt.cpan.org>, or through
+the web interface at L<http://rt.cpan.org/NoAuth/ReportBug.html?Queue=POE-Component-IRC-Plugin-BasePoCoWrap>.  I will be notified, and then you'll
+automatically be notified of progress on your bug as I make changes.
+
+=head1 SUPPORT
+
+You can find documentation for this module with the perldoc command.
+
+    perldoc POE::Component::IRC::Plugin::BasePoCoWrap
+
+You can also look for information at:
+
+=over 4
+
+=item * RT: CPAN's request tracker
+
+L<http://rt.cpan.org/NoAuth/Bugs.html?Dist=POE-Component-IRC-Plugin-BasePoCoWrap>
+
+=item * AnnoCPAN: Annotated CPAN documentation
+
+L<http://annocpan.org/dist/POE-Component-IRC-Plugin-BasePoCoWrap>
+
+=item * CPAN Ratings
+
+L<http://cpanratings.perl.org/d/POE-Component-IRC-Plugin-BasePoCoWrap>
+
+=item * Search CPAN
+
+L<http://search.cpan.org/dist/POE-Component-IRC-Plugin-BasePoCoWrap>
+
+=back
+
+=head1 COPYRIGHT & LICENSE
+
+Copyright 2008 Zoffix Znet, all rights reserved.
+
+This program is free software; you can redistribute it and/or modify it
+under the same terms as Perl itself.
+
+=cut

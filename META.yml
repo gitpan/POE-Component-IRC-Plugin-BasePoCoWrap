@@ -1,0 +1,25 @@
+---
+name: POE-Component-IRC-Plugin-BasePoCoWrap
+version: 0.001
+author:
+  - 'Zoffix Znet <zoffix@cpan.org>'
+abstract: |-
+  base talking/ban/trigger
+  functionality for plugins using POE::Component::*
+license: perl
+resources:
+  license: http://dev.perl.org/licenses/
+requires:
+  Carp: 1.04
+  POE: 0.9999
+  POE::Component::IRC::Plugin: 0.1
+build_requires:
+  Test::More: 0
+provides:
+  POE::Component::IRC::Plugin::BasePoCoWrap:
+    file: lib/POE/Component/IRC/Plugin/BasePoCoWrap.pm
+    version: 0.001
+generated_by: Module::Build version 0.2808
+meta-spec:
+  url: http://module-build.sourceforge.net/META-spec-v1.2.html
+  version: 1.2
