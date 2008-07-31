@@ -1,5 +1,9 @@
 Revision history for POE-Component-IRC-Plugin-BasePoCoWrap
 
+0.003   July 31, 2008
+        Fixed documentation a bit. Added separate triggers support
+        as well as the _message_into_response_event() method
+
 0.002   Mar 10, 2008
         Added 'root' functionality and fixed up the PLUGIN DOCUMENTATION
             section a bit.

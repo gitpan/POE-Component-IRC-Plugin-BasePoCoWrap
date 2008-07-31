@@ -3,7 +3,7 @@ package POE::Component::IRC::Plugin::BasePoCoWrap;
 use warnings;
 use strict;
 
-our $VERSION = '0.002';
+our $VERSION = '0.003';
 
 use Carp;
 use POE;
@@ -138,9 +138,18 @@ sub _parse_input {
     }
 
     return PCI_EAT_NONE
-        unless defined $what and $what =~ s/$self->{trigger}//;
+        unless defined $what;
 
-    $what =~ s/^\s+|\s+$//;
+    return PCI_EAT_NONE
+        unless (
+            ( exists $self->{triggers}{ $type }
+                and $what =~ s/$self->{triggers}{$type}//
+            )
+            or
+            ( exists $self->{trigger} and $what =~ s/$self->{trigger}// )
+    );
+
+    $what =~ s/^\s+|\s+$//g;
 
     return PCI_EAT_NONE
             unless length $what;
@@ -177,9 +186,26 @@ sub _poco_done {
     my $response_message
     = $self->_make_response_message( @_[ARG0 .. $#_] );
 
+    my $event_response;
+    if ( my $key = $self->_message_into_response_event( $in_ref ) ) {
+        if ( ref $key eq 'ARRAY' ) {
+            $in_ref->{ $key->[0] } = $response_message;
+            %$in_ref = (
+                %$in_ref,
+                %{ $key->[1] },
+            );
+        }
+        else {
+            $in_ref->{ $key } = $response_message;
+        }
+        $event_response = $in_ref;
+    }
+    else {
+        $event_response = $self->_make_response_event( $in_ref );
+    }
+
     $self->{irc}->_send_event(
-        $self->{response_event} =>
-        $self->_make_response_event( @_[ARG0 .. $#_] )
+        $self->{response_event} => $event_response,
     );
 
     if ( $self->{auto} ) {
@@ -202,6 +228,8 @@ sub _poco_done {
 
     undef;
 }
+
+sub _message_into_response_event { undef; }
 
 1;
 __END__
@@ -330,7 +358,7 @@ C<_make_default_args> sub:
 Read the L<PLUGIN DOCUMENTATION> section to understand what each of
 these do.
 
-=head2 _make_poco
+=head2 C<_make_poco>
 
     sub _make_poco {
         return POE::Component::WWW::Google::Calculator->spawn(
@@ -344,7 +372,7 @@ are available to the user in the C<new()> method of the plugin
 default ones) will be available as hash keys in the first element of C<@_>
 which is also your plugin's object.
 
-=head2 _make_poco_call
+=head2 C<_make_poco_call>
 
     sub _make_poco_call {
         my $self = shift;
@@ -382,31 +410,31 @@ keys/values:
 
 =over 10
 
-=item who
+=item C<who>
 
 The mask of the other who triggered the request
 
-=item what
+=item C<what>
 
 The input after stripping the trigger (note, leading/trailing white-space
 is stripped as well)
 
-=item type
+=item C<type>
 
 This will be either C<public>, C<privmsg> or C<notice> and will indicate
 where the message came from.
 
-=item channel
+=item C<channel>
 
 This will be the channel name if the request came from a public channel
 
-=item message
+=item C<message>
 
 This will be the full message of the user who triggered the request.
 
 =back
 
-=head2 _make_response_message 
+=head2 C<_make_response_message>
 
     sub _make_response_message {
         my $self   = shift;
@@ -419,7 +447,7 @@ channel/notice/msg (depending on the type of the request). The <@_> array
 will contain plugin's object as the first element and C<@_[ARG0 .. $#_]>
 will be the rest of the elements.
 
-=head2 _make_response_event
+=head2 C<_make_response_event>
 
     sub _make_response_event {
         my $self = shift;
@@ -447,6 +475,53 @@ Therefore it must return something that you would like to see in the
 even handler set up to handle C<response_even>. The C<@_> will contain
 plugin's object as the first element and C<@_[ARG0 .. $#_]>
 
+=head2 C<_message_into_response_event>
+
+    sub _message_into_response_event { 'name_of_key'; }
+
+While using previous version of this module I often found myself wishing
+to put the return value of C<_make_response_message()> as a certain key
+in C<$in_ref> of C<_make_response_event()> sub.. and didn't want to do
+whatever the plugin would be doing twice. Now this can be easily done.
+
+The C<_message_into_response_event> sub must return a true value which
+will be the name of the key which will contain the return value of
+C<_make_response_message()> sub and stuffed into C<$in_ref> hashref of
+the C<_make_response_event()> sub. Basically, if you are defining
+C<_message_into_response_event()> sub you should not define
+C<_make_response_message()> sub as it will never be called.
+
+If along with the return value of C<_make_response_message()> you also
+want to add some extra keys into the C<$in_ref> you can return an
+I<arrayref> from C<_message_into_response_event()> sub with two elements.
+The first element of that arrayref would be the name of the key into
+which to stick the return value of C<_make_response_message()>. The second
+element must be a I<hashref> with extra keys/values which will be
+set in the C<$in_ref>; note that you can override original keys from here.
+
+The C<@_> will contain your plugin's object as the first element and
+C<$in_ref> as a second element ( see C<_make_response_event()> )
+
+As an example, the following two snippets are equivalent:
+
+    sub _make_response_message {
+        return "Right now it is " . localtime;
+    }
+
+    sub _make_response_event {
+        my ( $self, $in_ref ) = @_;
+        $in_ref->{time} = "Right now it is " . localtime;
+        return $in_ref;
+    }
+
+    # is the same as:
+
+    sub _make_response_message {
+        return "Right now it is " . localtime;
+    }
+
+    sub _message_into_response_event { 'time' }
+
 =head1 PREREQUISITES
 
 This base class likes to play with the following modules under the hood:
@@ -459,7 +534,7 @@ This base class likes to play with the following modules under the hood:
 
 The C<examples/> directory of this distribution contains an example
 plugin written using POE::Component::IRC::Plugin::BasePoCoWrap as well as
-a google calculator bot which uses that plugin.
+a google page rank bot which uses that plugin.
 
 =head1 PLUGIN DOCUMENTATION
 
@@ -517,7 +592,7 @@ functionality this base class offers. B<Make sure to proof read> ;)
 
     =head1 CONSTRUCTOR
 
-    =head2 new
+    =head2 C<new>
 
         # plain and simple
         $irc->plugin_add(
@@ -534,6 +609,11 @@ functionality this base class offers. B<Make sure to proof read> ;)
                     addressed        => 1,
                     root             => [ qr/mah.net$/i ],
                     trigger          => qr/^EXAMPLE\s+(?=\S)/i,
+                    triggers         => {
+                        public  => qr/^EXAMPLE\s+(?=\S)/i,
+                        notice  => qr/^EXAMPLE\s+(?=\S)/i,
+                        privmsg => qr/^EXAMPLE\s+(?=\S)/i,
+                    },
                     listen_for_input => [ qw(public notice privmsg) ],
                     eat              => 1,
                     debug            => 0,
@@ -546,7 +626,7 @@ functionality this base class offers. B<Make sure to proof read> ;)
     takes a few arguments, but I<all of them are optional>. The possible
     arguments/values are as follows:
 
-    =head3 auto
+    =head3 C<auto>
 
         ->new( auto => 0 );
 
@@ -559,7 +639,7 @@ functionality this base class offers. B<Make sure to proof read> ;)
     EMITED EVENTS section and C<response_event> argument for details).
     B<Defaults to:> C<1>.
 
-    =head3 response_event
+    =head3 C<response_event>
 
         ->new( response_event => 'event_name_to_recieve_results' );
 
@@ -567,7 +647,7 @@ functionality this base class offers. B<Make sure to proof read> ;)
     to emit when the results of the request are ready. See EMITED EVENTS
     section for more information. B<Defaults to:> C<irc_EXAMPLE>
 
-    =head3 banned
+    =head3 C<banned>
 
         ->new( banned => [ qr/aol\.com$/i ] );
 
@@ -576,7 +656,7 @@ functionality this base class offers. B<Make sure to proof read> ;)
     the regexes listed in the C<banned> arrayref, plugin will ignore the
     request. B<Defaults to:> C<[]> (no bans are set).
 
-    =head3 root
+    =head3 C<root>
 
         ->new( root => [ qr/\Qjust.me.and.my.friend.net\E$/i ] );
 
@@ -587,18 +667,43 @@ functionality this base class offers. B<Make sure to proof read> ;)
     specifying an empty arrayref to C<root> argument will restrict
     access to everyone.
 
-    =head3 trigger
+    =head3 C<trigger>
 
         ->new( trigger => qr/^EXAMPLE\s+(?=\S)/i );
 
     B<Optional>. Takes a regex as an argument. Messages matching this
-    regex will be considered as requests. See also
-    B<addressed> option below which is enabled by default. B<Note:> the
+    regex, irrelevant of the type of the message, will be considered as requests. See also
+    B<addressed> option below which is enabled by default as well as
+    B<trigggers> option which is more specific. B<Note:> the
     trigger will be B<removed> from the message, therefore make sure your
     trigger doesn't match the actual data that needs to be processed.
     B<Defaults to:> C<qr/^EXAMPLE\s+(?=\S)/i>
 
-    =head3 addressed
+    =head3 C<triggers>
+
+        ->new( triggers => {
+                public  => qr/^EXAMPLE\s+(?=\S)/i,
+                notice  => qr/^EXAMPLE\s+(?=\S)/i,
+                privmsg => qr/^EXAMPLE\s+(?=\S)/i,
+            }
+        );
+
+    B<Optional>. Takes a hashref as an argument which may contain either
+    one or all of keys B<public>, B<notice> and B<privmsg> which indicates
+    the type of messages: channel messages, notices and private messages
+    respectively. The values of those keys are regexes of the same format and
+    meaning as for the C<trigger> argument (see above). 
+    Messages matching this
+    regex will be considered as requests. The difference is that only messages of type corresponding to the key of C<triggers> hashref
+    are checked for the trigger. B<Note:> the C<trigger> will be matched
+    irrelevant of the setting in C<triggers>, thus you can have one global and specific "local" triggers. See also
+    B<addressed> option below which is enabled by default as well as
+    B<trigggers> option which is more specific. B<Note:> the
+    trigger will be B<removed> from the message, therefore make sure your
+    trigger doesn't match the actual data that needs to be processed.
+    B<Defaults to:> C<qr/^EXAMPLE\s+(?=\S)/i>
+
+    =head3 C<addressed>
 
         ->new( addressed => 1 );
 
@@ -614,7 +719,7 @@ functionality this base class offers. B<Make sure to proof read> ;)
     in order to make a request. Note: this argument has no effect on
     C</notice> and C</msg> requests. B<Defaults to:> C<1>
 
-    =head3 listen_for_input
+    =head3 C<listen_for_input>
 
         ->new( listen_for_input => [ qw(public  notice  privmsg) ] );
 
@@ -631,7 +736,7 @@ functionality this base class offers. B<Make sure to proof read> ;)
     will enable functionality only via C</notice> and C</msg> messages.
     B<Defaults to:> C<[ qw(public  notice  privmsg) ]>
 
-    =head3 eat
+    =head3 C<eat>
 
         ->new( eat => 0 );
 
@@ -642,7 +747,7 @@ functionality this base class offers. B<Make sure to proof read> ;)
     documentation for more information if you are interested. B<Defaults to>:
     C<1>
 
-    =head3 debug
+    =head3 C<debug>
 
         ->new( debug => 1 );
 
@@ -653,21 +758,52 @@ functionality this base class offers. B<Make sure to proof read> ;)
 
     =head1 EMITED EVENTS
 
-    =head2 response_event
+    =head2 C<response_event>
 
        EXAMPLE
 
     The event handler set up to handle the event, name of which you've
     specified in the C<response_event> argument to the constructor
     (it defaults to C<irc_EXAMPLE>) will recieve input
-    every time request is completed. The input will come in EXAMPLE.
-    The EXAMPLE as follows:
+    every time request is completed. The input will come in C<$_[ARG0]>
+    on a form of a hashref.
+    The possible keys/values of that hashrefs are as follows:
 
-    EXAMPLE
-    EXAMPLE
-    EXAMPLE
-    EXAMPLE
-    EXAMPLE
+    =head3 C<EXAMPLE>
+
+    =head3 C<who>
+
+        { 'who' => 'Zoffix!Zoffix@i.love.debian.org', }
+
+    The C<who> key will contain the user mask of the user who sent the request.
+
+    =head3 C<what>
+
+        { 'what' => 'EXAMPLE', }
+
+    The C<what> key will contain user's message after stripping the C<trigger>
+    (see CONSTRUCTOR).
+
+    =head3 C<message>
+
+        { 'message' => 'EXAMPLE' }
+
+    The C<message> key will contain the actual message which the user sent; that
+    is before the trigger is stripped.
+
+    =head3 C<type>
+
+        { 'type' => 'public', }
+
+    The C<type> key will contain the "type" of the message the user have sent.
+    This will be either C<public>, C<privmsg> or C<notice>.
+
+    =head3 C<channel>
+
+        { 'channel' => '#zofbot', }
+
+    The C<channel> key will contain the name of the channel where the message
+    originated. This will only make sense if C<type> key contains C<public>.
 
 =head1 AUTHOR
 

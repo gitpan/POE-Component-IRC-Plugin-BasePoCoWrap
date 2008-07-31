@@ -7,7 +7,7 @@ t/00-load.t
 t/pod-coverage.t
 t/pod.t
 t/kwalitee.t
-examples/calc_bot.pl
+examples/rank_bot.pl
 examples/POE/Component/IRC/Plugin/WrapExample.pm
 Makefile.PL
 META.yml
