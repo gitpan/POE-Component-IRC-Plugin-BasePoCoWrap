@@ -3,7 +3,7 @@ package POE::Component::IRC::Plugin::BasePoCoWrap;
 use warnings;
 use strict;
 
-our $VERSION = '0.003';
+our $VERSION = '0.004';
 
 use Carp;
 use POE;
@@ -150,9 +150,6 @@ sub _parse_input {
     );
 
     $what =~ s/^\s+|\s+$//g;
-
-    return PCI_EAT_NONE
-            unless length $what;
 
     warn "Matched trigger: [ who => $who, channel => $channel, "
             . "what => $what ]"

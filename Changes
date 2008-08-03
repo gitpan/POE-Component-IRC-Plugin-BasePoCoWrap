@@ -1,5 +1,9 @@
 Revision history for POE-Component-IRC-Plugin-BasePoCoWrap
 
+0.004   August 8, 2008
+        Fixed the bug which prevented creating plugins that
+        required no input.
+
 0.003   July 31, 2008
         Fixed documentation a bit. Added separate triggers support
         as well as the _message_into_response_event() method
