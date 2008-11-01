@@ -1,5 +1,16 @@
 POE-Component-IRC-Plugin-BasePoCoWrap
 
+The module is a base class to use for plugins which use a
+POE::Component::* object internally.
+It provides: triggering with a trigger, listening for requests in
+public channels, /notice and /msg (with ability to configure which exactly)
+as well as auto-responding to those requests.
+It provides "banned" feature which allows you to ignore certain people
+if their usermask matches a regex.
+
+I am not sure how flexible this base wrapper can get, just give it a try.
+Suggestions for improvements/whishlists are more than welcome.
+
 INSTALLATION
 
 The module is a base class to use for plugins which use a

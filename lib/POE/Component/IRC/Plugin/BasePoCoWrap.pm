@@ -3,7 +3,7 @@ package POE::Component::IRC::Plugin::BasePoCoWrap;
 use warnings;
 use strict;
 
-our $VERSION = '0.004';
+our $VERSION = '0.005';
 
 use Carp;
 use POE;
@@ -200,6 +200,9 @@ sub _poco_done {
     else {
         $event_response = $self->_make_response_event( $in_ref );
     }
+
+    $response_message = [ $response_message ]
+        unless ref $response_message eq 'ARRAY';
 
     $self->{irc}->_send_event(
         $self->{response_event} => $event_response,
@@ -439,7 +442,11 @@ This will be the full message of the user who triggered the request.
         return [ exists $in_ref->{error} ? $in_ref->{error} : $in_ref->{out} ];
     }
 
-This sub must return an arrayref. Each element will be "spoken" in the
+This sub must return an arrayref or a single string. If a string is returned then it
+is almost the same as returning an arrayref with just that string in it; by "almost" I mean
+that the difference is also there if you are using C<_message_into_response_event()> thus
+either a string or an arrayref wil be present in the response event.
+Each element of the returned arrayref will be "spoken" in the
 channel/notice/msg (depending on the type of the request). The <@_> array
 will contain plugin's object as the first element and C<@_[ARG0 .. $#_]>
 will be the rest of the elements.
@@ -768,39 +775,39 @@ functionality this base class offers. B<Make sure to proof read> ;)
 
     =head3 C<EXAMPLE>
 
-    =head3 C<who>
+    =head3 C<_who>
 
-        { 'who' => 'Zoffix!Zoffix@i.love.debian.org', }
+        { '_who' => 'Zoffix!Zoffix@i.love.debian.org', }
 
-    The C<who> key will contain the user mask of the user who sent the request.
+    The C<_who> key will contain the user mask of the user who sent the request.
 
-    =head3 C<what>
+    =head3 C<_what>
 
-        { 'what' => 'EXAMPLE', }
+        { '_what' => 'EXAMPLE', }
 
-    The C<what> key will contain user's message after stripping the C<trigger>
+    The C<_what> key will contain user's message after stripping the C<trigger>
     (see CONSTRUCTOR).
 
-    =head3 C<message>
+    =head3 C<_message>
 
-        { 'message' => 'EXAMPLE' }
+        { '_message' => 'EXAMPLE' }
 
-    The C<message> key will contain the actual message which the user sent; that
+    The C<_message> key will contain the actual message which the user sent; that
     is before the trigger is stripped.
 
-    =head3 C<type>
+    =head3 C<_type>
 
-        { 'type' => 'public', }
+        { '_type' => 'public', }
 
-    The C<type> key will contain the "type" of the message the user have sent.
+    The C<_type> key will contain the "type" of the message the user have sent.
     This will be either C<public>, C<privmsg> or C<notice>.
 
-    =head3 C<channel>
+    =head3 C<_channel>
 
-        { 'channel' => '#zofbot', }
+        { '_channel' => '#zofbot', }
 
-    The C<channel> key will contain the name of the channel where the message
-    originated. This will only make sense if C<type> key contains C<public>.
+    The C<_channel> key will contain the name of the channel where the message
+    originated. This will only make sense if C<_type> key contains C<public>.
 
 =head1 AUTHOR
 

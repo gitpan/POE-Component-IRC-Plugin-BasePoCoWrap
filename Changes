@@ -1,5 +1,9 @@
 Revision history for POE-Component-IRC-Plugin-BasePoCoWrap
 
+0.005   November 1, 2008
+        Added ability to return a string from _make_response_message() instead of
+        always having to return an arrayref
+
 0.004   August 8, 2008
         Fixed the bug which prevented creating plugins that
         required no input.
