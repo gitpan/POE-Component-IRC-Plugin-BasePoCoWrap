@@ -57,7 +57,9 @@ sub _default {
 
 =pod
 
-Usage: perl calc_bot.pl
+Usage: perl rank_bot.pl
+
+Address the bot with "rank http://example.com/"
 
 =cut
 

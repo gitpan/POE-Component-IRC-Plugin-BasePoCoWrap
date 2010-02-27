@@ -1,5 +1,8 @@
 Revision history for POE-Component-IRC-Plugin-BasePoCoWrap
 
+0.006   February 27, 2010
+        Added `response_types`; changed _send_event() to send_event()
+
 0.005   November 1, 2008
         Added ability to return a string from _make_response_message() instead of
         always having to return an arrayref
