@@ -3,7 +3,7 @@ package POE::Component::IRC::Plugin::BasePoCoWrap;
 use warnings;
 use strict;
 
-our $VERSION = '0.006';
+our $VERSION = '0.007';
 
 use Carp;
 use POE;
@@ -241,6 +241,7 @@ sub _message_into_response_event { undef; }
 1;
 __END__
 
+=encoding utf8
 
 =head1 NAME
 

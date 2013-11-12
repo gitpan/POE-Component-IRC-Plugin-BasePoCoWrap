@@ -8,7 +8,7 @@ use POE qw(Component::IRC  Component::IRC::Plugin::WrapExample);
 my @Channels = ( '#zofbot' );
 
 my $irc = POE::Component::IRC->spawn(
-    nick        => 'CalcBot',
+    nick        => 'RankBot',
     server      => 'irc.freenode.net',
     port        => 6667,
     ircname     => 'Google Calculator bot',
@@ -47,6 +47,7 @@ sub _default {
             push @output, '[' . join ( q| ,|, @$arg ) . ']';
         }
         else {
+            $arg ='' unless defined $arg;
             push @output, "'$arg'";
         }
     }

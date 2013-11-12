@@ -3,7 +3,7 @@ package POE::Component::IRC::Plugin::WrapExample;
 use strict;
 use warnings;
 
-use lib '../lib';
+use lib qw(../lib lib);
 
 use base 'POE::Component::IRC::Plugin::BasePoCoWrap';
 use POE::Component::WWW::Google::PageRank;
